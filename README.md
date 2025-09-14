@@ -21,7 +21,7 @@ A WhatsApp bot for Social Media Marketing (SMM) services with integrated payment
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/yourusername/whats-smm.git
+   git clone https://github.com/codeskytz/whats-smm.git
    cd whats-smm
    ```
 
@@ -112,9 +112,6 @@ A WhatsApp bot for Social Media Marketing (SMM) services with integrated payment
 - [x] Error logging
 - [x] Sanitized error responses
 
-## 📄 License
-
-MIT
 
 ## 🤝 Contributing
 
