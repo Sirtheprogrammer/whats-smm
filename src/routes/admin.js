@@ -5,6 +5,7 @@ const smm = require('../services/smmguo');
 const SmmService = require('../models/smmService');
 const Session = require('../models/session');
 const logCollector = require('../utils/logCollector');
+const Order = require('../models/order');
 
 // Middleware to verify admin token
 const verifyAdminToken = (req, res, next) => {
@@ -263,6 +264,44 @@ router.post('/send', async (req, res) => {
     }
 });
 
+// list recent orders
+router.get('/orders', async (req, res) => {
+    try {
+        const orders = await Order.find().sort({ createdAt: -1 }).limit(200).lean();
+        res.json({ orders });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// get single order by orderId
+router.get('/orders/:orderId', async (req, res) => {
+    try {
+        const { orderId } = req.params;
+        const order = await Order.findOne({ orderId }).lean();
+        if (!order) return res.status(404).json({ error: 'order not found' });
+        res.json({ order });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// update order status (admin)
+router.post('/orders/:orderId/status', async (req, res) => {
+    try {
+        const { orderId } = req.params;
+        const { status } = req.body || {};
+        if (!status) return res.status(400).json({ error: 'status required' });
+        const allowed = ['PENDING','PROCESSING','COMPLETED','FAILED','CANCELLED'];
+        if (!allowed.includes(status)) return res.status(400).json({ error: 'invalid status' });
+        const updated = await Order.findOneAndUpdate({ orderId }, { $set: { status } }, { new: true }).lean();
+        if (!updated) return res.status(404).json({ error: 'order not found' });
+        res.json({ success: true, order: updated });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // return platforms (from cache or API)
 router.get('/smm/platforms', async (req, res) => {
     try {
@@ -289,6 +328,54 @@ router.get('/smm/catalog', async (req, res) => {
     try {
         const items = await SmmService.find().limit(200).lean();
         res.json({ services: items });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// get single service by serviceId
+router.get('/smm/catalog/:serviceId', async (req, res) => {
+    try {
+        const { serviceId } = req.params;
+        const item = await SmmService.findOne({ serviceId }).lean();
+        if (!item) return res.status(404).json({ error: 'service not found' });
+        res.json({ service: item });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// update service details (name, price in TZS, category)
+router.put('/smm/catalog/:serviceId', async (req, res) => {
+    try {
+        const { serviceId } = req.params;
+        const { name, price_tzs, category } = req.body || {};
+        const update = {};
+        if (name) update.name = name;
+        if (typeof price_tzs !== 'undefined' && price_tzs !== null) {
+            const p = Number(price_tzs);
+            if (Number.isFinite(p) && p >= 0) update.price = p; // store price as TZS
+            else return res.status(400).json({ error: 'price_tzs must be a non-negative number' });
+        }
+        if (typeof category !== 'undefined') update.category = category || null;
+        if (!Object.keys(update).length) return res.status(400).json({ error: 'nothing to update' });
+        const updated = await SmmService.findOneAndUpdate({ serviceId }, { $set: update }, { new: true }).lean();
+        if (!updated) return res.status(404).json({ error: 'service not found' });
+        res.json({ success: true, service: updated });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// rename a category across services for a platform (or globally if platform omitted)
+router.post('/smm/category/rename', async (req, res) => {
+    try {
+        const { platform, oldName, newName } = req.body || {};
+        if (!oldName || !newName) return res.status(400).json({ error: 'oldName and newName required' });
+        const q = { category: oldName };
+        if (platform) q.platform = platform;
+        const result = await SmmService.updateMany(q, { $set: { category: newName } });
+        res.json({ success: true, matchedCount: result.matchedCount || result.n || 0, modifiedCount: result.modifiedCount || result.nModified || 0 });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -358,7 +445,11 @@ router.post('/smm/import', async (req, res) => {
             if (!sid) continue;
             const existing = await SmmService.findOne({ serviceId: sid }).lean();
             if (existing) continue;
-            const doc = new SmmService({ serviceId: sid, platform: platform, category: s.category || null, name: s.name || sid, price: s.price || null, raw: s });
+            // try to enrich price from remote
+            let remote = null;
+            try { remote = await smm.getServiceById(sid); } catch (e) { remote = null; }
+            const priceVal = s.price || (remote && (remote.price || remote.rate)) || null;
+            const doc = new SmmService({ serviceId: sid, platform: platform, category: s.category || null, name: s.name || sid, price: priceVal, raw: s });
             await doc.save();
             imported.push(doc);
         }
@@ -385,6 +476,30 @@ router.get('/users', async (req, res) => {
         const sessions = await Session.find().sort({ updatedAt: -1 }).limit(200).lean();
         const users = sessions.map(s => ({ sessionId: s.sessionId, lastSeen: s.updatedAt, data: s.data }));
         res.json({ users });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// delete service from local catalogue by serviceId
+router.delete('/smm/catalog/:serviceId', async (req, res) => {
+    try {
+        const { serviceId } = req.params;
+        if (!serviceId) return res.status(400).json({ error: 'serviceId required' });
+
+        // try to delete by serviceId first
+        let deleted = await SmmService.findOneAndDelete({ serviceId }).lean();
+
+        // if not found, also allow deleting by Mongo _id when serviceId looks like an object id
+        if (!deleted) {
+            const mongoose = require('mongoose');
+            if (mongoose.Types.ObjectId.isValid(serviceId)) {
+                deleted = await SmmService.findByIdAndDelete(serviceId).lean();
+            }
+        }
+
+        if (!deleted) return res.status(404).json({ error: 'service not found' });
+        res.json({ success: true, deleted });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }

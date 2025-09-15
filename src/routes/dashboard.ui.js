@@ -26,6 +26,7 @@ router.get('/dashboard', (req, res) => {
     <div>
       <button onclick="refreshStatus()">Refresh Status</button>
       <button onclick="openImportUI()">Import UI</button>
+      <button onclick="renameCategory()">Rename Category</button>
     </div>
   </header>
 
@@ -69,6 +70,12 @@ router.get('/dashboard', (req, res) => {
     <h2>Quick Logs</h2>
     <button onclick="fetchLogs()">Refresh Logs</button>
     <pre id="logs">No logs yet.</pre>
+  </section>
+
+  <section class="panel" id="ordersPanel">
+    <h2>Orders</h2>
+    <button onclick="fetchOrders()">Refresh Orders</button>
+    <div id="ordersContainer">No orders loaded.</div>
   </section>
 
   <script>
@@ -161,10 +168,17 @@ router.get('/dashboard', (req, res) => {
       var rows = '';
       for (var i=0;i<items.length;i++){
         var it = items[i];
-        rows += '<tr><td>' + (it.serviceId || '') + '</td><td>' + (it.platform || '') + '</td><td>' + (it.category||'') + '</td><td>' + (it.name || '') + '</td><td>' + (it.price||'') + '</td></tr>';
+        rows += '<tr><td>' + (it.serviceId || '') + '</td><td>' + (it.platform || '') + '</td><td>' + (it.category||'') + '</td><td>' + (it.name || '') + '</td><td>' + (it.price||'') + '</td><td><button data-id="'+(it.serviceId||'')+'" class="editSvc">Edit</button> <button data-id="'+(it.serviceId||'')+'" class="deleteSvc">Delete</button></td></tr>';
       }
-      document.getElementById('catalog').innerHTML = '<table><tr><th>id</th><th>platform</th><th>category</th><th>name</th><th>price</th></tr>' + rows + '</table>';
+      document.getElementById('catalog').innerHTML = '<table><tr><th>id</th><th>platform</th><th>category</th><th>name</th><th>price (TZS)</th><th>actions</th></tr>' + rows + '</table>';
+      // wire edit buttons
+      Array.from(document.getElementsByClassName('editSvc')).forEach(function(b){ b.addEventListener('click', async function(){ var id = this.dataset.id; var name = prompt('New name (leave empty to keep)'); var price = prompt('Price in TZS (leave empty to keep)'); var category = prompt('Category (leave empty to keep)'); var body = {}; if (name) body.name = name; if (price) body.price_tzs = Number(price); if (category) body.category = category; if (Object.keys(body).length===0) return alert('Nothing to update'); var resp = await window.jsonFetch('/admin/smm/catalog/'+encodeURIComponent(id), { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) }); alert(JSON.stringify(resp.data||resp.error)); window.fetchCatalog(); }); });
+      // wire delete buttons
+      Array.from(document.getElementsByClassName('deleteSvc')).forEach(function(b){ b.addEventListener('click', async function(){ var id = this.dataset.id; if (!confirm('Delete service "' + id + '"? This cannot be undone.')) return; var resp = await window.jsonFetch('/admin/smm/catalog/'+encodeURIComponent(id), { method:'DELETE' }); if (resp.ok) { alert('Deleted'); } else { alert('Delete failed: ' + JSON.stringify(resp.data || resp.error)); } window.fetchCatalog(); }); });
     };
+
+    window.renameCategory = async function() {
+      var oldName = prompt('Old category name'); if (!oldName) return; var newName = prompt('New category name'); if (!newName) return; var platform = prompt('Platform (optional, leave empty for all)'); var r = await window.jsonFetch('/admin/smm/category/rename', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ platform: platform || undefined, oldName: oldName, newName: newName }) }); alert(JSON.stringify(r.data||r.error)); window.fetchCatalog(); };
 
     window.fetchUsers = async function() {
       var r = await window.jsonFetch('/admin/users');
@@ -188,11 +202,51 @@ router.get('/dashboard', (req, res) => {
 
     window.openImportUI = function() { window.location.href = '/admin/ui/smm/import'; };
 
+    window.fetchOrders = async function() {
+      var r = await window.jsonFetch('/admin/orders');
+      if (!r.ok) return document.getElementById('ordersContainer').innerText = 'Failed to load orders';
+      var orders = (r.data && r.data.orders) || [];
+      if (!orders.length) return document.getElementById('ordersContainer').innerText = 'No orders yet';
+      var rows = '<table><tr><th>Order ID</th><th>Service</th><th>Qty</th><th>Amount (TZS)</th><th>Status</th><th>Actions</th></tr>';
+      for (var i=0;i<orders.length;i++){
+        var o = orders[i];
+        rows += '<tr>' +
+                '<td>' + (o.orderId||'') + '</td>' +
+                '<td>' + (o.serviceName||o.serviceId||'') + '</td>' +
+                '<td>' + (o.quantity||'') + '</td>' +
+                '<td>' + (o.amount_due_tzs||'') + '</td>' +
+                '<td>' + (o.status||'') + '</td>' +
+                '<td><button data-id="'+(o.orderId||'')+'" class="viewOrder">View</button> <button data-id="'+(o.orderId||'')+'" class="updateOrder">Update Status</button></td>' +
+                '</tr>';
+      }
+      rows += '</table>';
+      document.getElementById('ordersContainer').innerHTML = rows;
+      Array.from(document.getElementsByClassName('viewOrder')).forEach(function(b){ b.addEventListener('click', function(){ window.viewOrder(this.dataset.id); }); });
+      Array.from(document.getElementsByClassName('updateOrder')).forEach(function(b){ b.addEventListener('click', function(){ var id = this.dataset.id; var status = prompt('New status (PENDING, PROCESSING, COMPLETED, FAILED, CANCELLED)'); if (!status) return; window.updateOrderStatus(id, status); }); });
+    };
+
+    window.viewOrder = async function(orderId) {
+      var r = await window.jsonFetch('/admin/orders/' + encodeURIComponent(orderId));
+      if (!r.ok) return alert('Failed to fetch order');
+      var o = r.data.order;
+      var txt = JSON.stringify(o, null, 2);
+      // show in logs panel for inspection
+      document.getElementById('logs').innerText = txt;
+    };
+
+    window.updateOrderStatus = async function(orderId, status) {
+      var r = await window.jsonFetch('/admin/orders/' + encodeURIComponent(orderId) + '/status', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ status: status }) });
+      if (!r.ok) return alert('Failed to update order: ' + JSON.stringify(r.data || r.error));
+      alert('Order updated');
+      window.fetchOrders();
+    };
+
     // initial load
     window.refreshStatus();
     window.fetchCatalog();
     window.fetchUsers();
     window.fetchLogs();
+    window.fetchOrders();
   </script>
 </body>
 </html>

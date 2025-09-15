@@ -144,10 +144,19 @@ async function createOrder(params) {
   }
 }
 
+async function getServiceById(id) {
+  if (!id) return null;
+  const all = await fetchAllRemoteServices();
+  const match = all.find(s => String(s.service || s.id || s.name) === String(id));
+  if (!match) return null;
+  return match;
+}
+
 module.exports = {
   getPlatforms,
   getCategories,
   getServices,
   fetchAllServicesForPlatform,
-  createOrder
+  createOrder,
+  getServiceById
 };
