@@ -118,9 +118,30 @@ async function fetchAllServicesForPlatform(platformId) {
   }).map(s => ({ id: s.service || s.id || s.name, name: s.name || s.service || ('Service ' + (s.service || s.id)), price: s.price || null, raw: s }));
 }
 
-// stub: create order left until payment confirmation
+// create order: uses the SMM provider 'add' action
 async function createOrder(params) {
-  return { success: false, message: 'createOrder not implemented yet', params };
+  // expected params: { service, link, quantity, runs?, interval?, buyer_name?, buyer_phone?, buyer_email? }
+  const body = {
+    key: API_KEY,
+    action: 'add',
+    service: params.service,
+    link: params.link,
+    quantity: params.quantity,
+  };
+  // optional fields
+  if (params.runs) body.runs = params.runs;
+  if (params.interval) body.interval = params.interval;
+  if (params.buyer_name) body.buyer_name = params.buyer_name;
+  if (params.buyer_phone) body.buyer_phone = params.buyer_phone;
+  if (params.buyer_email) body.buyer_email = params.buyer_email;
+
+  try {
+    const resp = await apiPost(body);
+    // return raw provider response
+    return resp;
+  } catch (err) {
+    return { error: err.message || String(err) };
+  }
 }
 
 module.exports = {

@@ -127,6 +127,33 @@ class WhatsAppBot {
             await this.sendMessage(from, result.reply);
             logCollector.add('Replied to ' + from + ' with conversation reply');
           }
+
+          // If session contains a placed order, attempt to create the remote order
+          try {
+            const mongoose = require('mongoose');
+            // attempt to load session to check for order
+            const Session = require('../models/session');
+            const sid = from.replace('@s.whatsapp.net','');
+            const sdoc = await Session.findOne({ sessionId: sid }).lean().catch(()=>null);
+            if (sdoc && sdoc.data && sdoc.data.order && sdoc.data.state === 'ORDER_PLACED') {
+              const order = sdoc.data.order;
+              // prevent duplicate remote orders by marking local order processing flag
+              if (!sdoc.data.order.remoteOrderId && !sdoc.data.order.processing) {
+                // mark processing
+                await Session.updateOne({ sessionId: sid }, { $set: { 'data.order.processing': true } }).catch(()=>{});
+                const svc = order.service || {};
+                const createResp = await require('../services/smmguo').createOrder({ service: svc.id || svc.serviceId || svc.raw && svc.raw.service, link: order.target, quantity: order.quantity, buyer_phone: order.phone });
+                // save remote response
+                await Session.updateOne({ sessionId: sid }, { $set: { 'data.order.remote': createResp, 'data.order.status': (createResp && (createResp.result || createResp.status || createResp.success)) || 'SUBMITTED' } }).catch(()=>{});
+                // notify user
+                await this.sendMessage(from, 'Your order has been submitted to provider. Response: ' + JSON.stringify(createResp));
+              }
+            }
+          } catch (e) {
+            logger.error('order submission error', e);
+            logCollector.add('order submission error: ' + e.message);
+          }
+
         } catch (e) {
           logger.error('conversation handler error', e);
           logCollector.add('conversation handler error: ' + e.message);

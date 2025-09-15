@@ -319,55 +319,67 @@ router.get('/smm/platforms/:platformId/categories/:categoryId/services', async (
 // import selected services into DB
 router.post('/smm/import', async (req, res) => {
     try {
-        const { platform, services } = req.body || {};
-        if (!platform || !services || !Array.isArray(services)) return res.status(400).json({ error: 'platform and services[] required' });
+        let { platform, services } = req.body || {};
+
+        // If services is a string (form post or missing content-type), try to parse it
+        if (typeof services === 'string') {
+            // try JSON first
+            try {
+                services = JSON.parse(services);
+            } catch (e) {
+                // fallback: comma-separated ids (e.g. services=1,2,3)
+                services = services.split(',').map(s => ({ id: s.trim() })).filter(s => s.id);
+            }
+        }
+
+        // If no services supplied, fetch all services for the platform from remote
+        if (!services || !Array.isArray(services) || services.length === 0) {
+            if (!platform) {
+                console.log('Bad import payload (no platform)', { platform, services, body: req.body });
+                return res.status(400).json({ error: 'platform (string) required when services not provided' });
+            }
+            try {
+                const remote = await smm.fetchAllServicesForPlatform(platform);
+                services = (Array.isArray(remote) ? remote : []).map(s => ({ id: s.id || s.service || (s.raw && (s.raw.service || s.raw.id)) || s.name, name: s.name || s.service || s.id, price: s.price || null, raw: s }));
+            } catch (e) {
+                console.log('Failed to fetch remote services for platform', platform, e && e.message);
+                services = [];
+            }
+        }
+
+        if (!platform || !services || !Array.isArray(services)) {
+            console.log('Bad import payload', { platform, services, body: req.body });
+            return res.status(400).json({ error: 'platform (string) and services (array) are required. If you POSTed form-encoded data, ensure services is JSON or comma-separated list.' });
+        }
+
         const imported = [];
         for (const s of services) {
-            const existing = await SmmService.findOne({ serviceId: s.id }).lean();
+            const sid = s.id || s.serviceId || s.service || (s.raw && (s.raw.service || s.raw.id)) || null;
+            if (!sid) continue;
+            const existing = await SmmService.findOne({ serviceId: sid }).lean();
             if (existing) continue;
-            const doc = new SmmService({ serviceId: s.id, platform: platform, category: null, name: s.name, price: s.price || null, raw: s });
+            const doc = new SmmService({ serviceId: sid, platform: platform, category: s.category || null, name: s.name || sid, price: s.price || null, raw: s });
             await doc.save();
             imported.push(doc);
         }
+
         res.json({ success: true, importedCount: imported.length, imported });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
 
-// list active sessions (simple admin view)
-router.get('/sessions', async (req, res) => {
-    try {
-        const sessions = await Session.find().sort({ updatedAt: -1 }).limit(200).lean();
-        res.json({ sessions });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-// clear a session by sessionId
-router.post('/sessions/clear', async (req, res) => {
-    try {
-        const { sessionId } = req.body || {};
-        if (!sessionId) return res.status(400).json({ error: 'sessionId required' });
-        await Session.deleteOne({ sessionId });
-        res.json({ success: true });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-// fetch recent logs
+// fetch recent logs (used by dashboard)
 router.get('/logs', async (req, res) => {
     try {
-        const logs = logCollector.getRecent(100);
+        const logs = logCollector.getRecent(200);
         res.json({ logs });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
 
-// active users view (sessions already exist)
+// list active users (from sessions)
 router.get('/users', async (req, res) => {
     try {
         const sessions = await Session.find().sort({ updatedAt: -1 }).limit(200).lean();
