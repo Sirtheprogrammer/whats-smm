@@ -152,11 +152,24 @@ async function getServiceById(id) {
   return match;
 }
 
+// get order status from provider
+async function getOrderStatus(providerOrderId) {
+  if (!providerOrderId) return { error: 'missing_order_id' };
+  try {
+    const body = { key: API_KEY, action: 'status', order: providerOrderId };
+    const resp = await apiPost(body);
+    return resp;
+  } catch (err) {
+    return { error: err.message || String(err) };
+  }
+}
+
 module.exports = {
   getPlatforms,
   getCategories,
   getServices,
   fetchAllServicesForPlatform,
   createOrder,
-  getServiceById
+  getServiceById,
+  getOrderStatus
 };

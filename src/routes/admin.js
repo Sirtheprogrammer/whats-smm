@@ -25,46 +25,26 @@ router.get('/panel', (req, res) => {
         <html>
         <head>
             <title>WhatsApp SMM Bot Admin Panel</title>
+            <meta charset="utf-8" />
+            <meta name="viewport" content="width=device-width,initial-scale=1" />
             <style>
-                body {
-                    font-family: Arial, sans-serif;
-                    max-width: 800px;
-                    margin: 20px auto;
-                    padding: 20px;
-                }
-                .qr-container {
-                    text-align: center;
-                    margin: 20px 0;
-                }
-                .status-container {
-                    background: #f5f5f5;
-                    padding: 15px;
-                    border-radius: 5px;
-                    margin: 20px 0;
-                }
+                body { font-family: Arial, sans-serif; max-width: 1100px; margin: 20px auto; padding: 20px; }
+                .flex { display:flex; gap:12px; align-items:center; }
+                .qr-container { text-align: center; margin: 20px 0; }
+                .status-container { background: #f5f5f5; padding: 15px; border-radius: 5px; margin: 20px 0; }
                 .status-connected { color: green; }
                 .status-disconnected { color: red; }
                 .status-connecting { color: orange; }
-                button {
-                    padding: 10px 20px;
-                    margin: 5px;
-                    cursor: pointer;
-                }
-                #qrCode {
-                    max-width: 300px;
-                    margin: 20px auto;
-                }
-                .message-form {
-                    margin: 20px 0;
-                    padding: 15px;
-                    background: #f9f9f9;
-                    border-radius: 5px;
-                }
-                .message-form input, .message-form textarea {
-                    width: 100%;
-                    margin: 5px 0;
-                    padding: 5px;
-                }
+                button { padding: 8px 12px; margin: 5px; cursor: pointer; }
+                #qrCode { max-width: 300px; margin: 20px auto; }
+                .message-form, .user-form { margin: 20px 0; padding: 15px; background: #f9f9f9; border-radius: 5px; }
+                .message-form input, .message-form textarea, .user-form input, .user-form select { width: 100%; margin: 6px 0; padding: 8px; box-sizing: border-box; }
+                table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+                table th, table td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+                table th { background: #f2f2f2; }
+                .small { font-size: 0.9em; color: #666; }
+                .token-row { display:flex; gap:8px; align-items:center; margin-bottom:12px; }
+                .actions { margin-top:10px; }
             </style>
         </head>
         <body>
@@ -88,14 +68,151 @@ router.get('/panel', (req, res) => {
                 <button onclick="sendMessage()">Send Message</button>
             </div>
 
-            <div class="actions">
+            <div class="flex">
                 <button onclick="connectBot()">Connect (generate QR)</button>
                 <button onclick="logout()">Logout</button>
                 <button onclick="checkStatus()">Refresh Status</button>
             </div>
 
+            <hr />
+
+            <h2>User Management</h2>
+            <div class="token-row">
+                <input id="adminToken" placeholder="Enter admin token (x-admin-token)" />
+                <button onclick="saveToken()">Save Token</button>
+                <button onclick="clearToken()">Clear</button>
+                <span class="small">Token is stored in browser localStorage for convenience.</span>
+            </div>
+
+            <div class="user-form">
+                <h3>Create / Update User</h3>
+                <input id="u_phone" placeholder="Phone (e.g. 2557XXXXXXXX)" />
+                <input id="u_referred_by" placeholder="Referred by (phone) - optional" />
+                <select id="u_language"><option value="en">English</option><option value="sw">Kiswahili</option></select>
+                <input id="u_balance" placeholder="Balance (TZS) - optional" />
+                <input id="u_referralCode" placeholder="Referral Code - optional" />
+                <div class="actions">
+                    <button onclick="createOrUpdateUser()">Create / Update</button>
+                    <button onclick="loadUsers()">Refresh List</button>
+                </div>
+                <div id="userMsg" class="small"></div>
+            </div>
+
+            <div>
+                <h3>Active Users (sessions)</h3>
+                <div id="usersTableContainer">Loading...</div>
+            </div>
+
+            <hr />
+
+            <div>
+                <h3>Developer / Debug</h3>
+                <button onclick="openDebug()">Open Debug Tools</button>
+            </div>
+
             <script>
-                let qrCheckInterval;
+                function getToken() {
+                    return localStorage.getItem('admin_token') || document.getElementById('adminToken').value || '';
+                }
+                function saveToken() {
+                    const t = document.getElementById('adminToken').value || '';
+                    if (t) { localStorage.setItem('admin_token', t); alert('Token saved to localStorage'); }
+                }
+                function clearToken() { localStorage.removeItem('admin_token'); document.getElementById('adminToken').value = ''; alert('Token cleared'); }
+
+                // load saved token into input on start
+                document.addEventListener('DOMContentLoaded', () => {
+                    const t = localStorage.getItem('admin_token'); if (t) document.getElementById('adminToken').value = t;
+                    checkStatus(); loadUsers();
+                });
+
+                async function fetchWithToken(url, opts) {
+                    opts = opts || {};
+                    opts.headers = opts.headers || {};
+                    const token = getToken();
+                    if (token) opts.headers['x-admin-token'] = token;
+                    if (!opts.headers['Content-Type'] && opts.body) opts.headers['Content-Type'] = 'application/json';
+                    if (opts.body && typeof opts.body === 'object') opts.body = JSON.stringify(opts.body);
+                    try {
+                        const r = await fetch(url, opts);
+                        const text = await r.text();
+                        try { return { ok: r.ok, status: r.status, json: JSON.parse(text) }; } catch(e) { return { ok: r.ok, status: r.status, text }; }
+                    } catch (e) { return { ok: false, error: e && e.message }; }
+                }
+
+                async function loadUsers() {
+                    const container = document.getElementById('usersTableContainer');
+                    container.innerHTML = 'Loading...';
+                    const res = await fetchWithToken('/admin/users', { method: 'GET' });
+                    if (!res.ok) { container.innerHTML = '<div style="color:red">Failed to load users: ' + (res.status || res.error) + '</div>'; return; }
+                    const users = res.json.users || [];
+                    if (!users.length) { container.innerHTML = '<div>No users found.</div>'; return; }
+                    let html = '<table><thead><tr><th>Phone</th><th>Lang</th><th>Balance</th><th>Referred By</th><th>Referral Code</th><th>Actions</th></tr></thead><tbody>';
+                    users.forEach(u => {
+                        html += `<tr>
+                            <td>${u.phone}</td>
+                            <td>${u.language || 'en'}</td>
+                            <td>${u.balance_tzs || 0}</td>
+                            <td>${u.referred_by || ''}</td>
+                            <td>${u.referralCode || ''}</td>
+                            <td>
+                                <button onclick="editUser('${u.phone}')">Edit</button>
+                                <button onclick="setUserLanguage('${u.phone}','en')">EN</button>
+                                <button onclick="setUserLanguage('${u.phone}','sw')">SW</button>
+                                <button onclick="deleteUser('${u.phone}')">Delete</button>
+                            </td>
+                        </tr>`;
+                    });
+                    html += '</tbody></table>';
+                    container.innerHTML = html;
+                }
+
+                async function editUser(phone) {
+                    const res = await fetchWithToken('/admin/user/' + encodeURIComponent(phone), { method: 'GET' });
+                    if (!res.ok) { alert('Failed to fetch user: ' + (res.status || res.error)); return; }
+                    const u = res.json.user;
+                    document.getElementById('u_phone').value = u.phone || '';
+                    document.getElementById('u_referred_by').value = u.referred_by || '';
+                    document.getElementById('u_language').value = u.language || 'en';
+                    document.getElementById('u_balance').value = u.balance_tzs || '';
+                    document.getElementById('u_referralCode').value = u.referralCode || '';
+                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                }
+
+                async function createOrUpdateUser() {
+                    const phone = document.getElementById('u_phone').value.trim();
+                    if (!phone) { document.getElementById('userMsg').textContent = 'Phone is required'; return; }
+                    const payload = {
+                        phone,
+                        referred_by: document.getElementById('u_referred_by').value.trim() || undefined,
+                        language: document.getElementById('u_language').value || undefined,
+                        balance_tzs: document.getElementById('u_balance').value ? Number(document.getElementById('u_balance').value) : undefined,
+                        referralCode: document.getElementById('u_referralCode').value.trim() || undefined
+                    };
+                    const res = await fetchWithToken('/admin/user', { method: 'POST', body: payload });
+                    if (!res.ok) { document.getElementById('userMsg').textContent = 'Failed: ' + (res.status || res.error); return; }
+                    document.getElementById('userMsg').textContent = 'User created/updated successfully';
+                    loadUsers();
+                }
+
+                async function deleteUser(phone) {
+                    if (!confirm('Delete user ' + phone + '? This will remove their account and session.')) return;
+                    const res = await fetchWithToken('/admin/user/' + encodeURIComponent(phone), { method: 'DELETE' });
+                    if (!res.ok) { alert('Failed to delete: ' + (res.status || res.error)); return; }
+                    alert('User deleted');
+                    loadUsers();
+                }
+
+                async function setUserLanguage(phone, lang) {
+                    const res = await fetchWithToken('/admin/user/' + encodeURIComponent(phone) + '/language', { method: 'POST', body: { language: lang } });
+                    if (!res.ok) { alert('Failed to set language: ' + (res.status || res.error)); return; }
+                    alert('Language set to ' + lang + ' for ' + phone);
+                    loadUsers();
+                }
+
+                async function openDebug() {
+                    window.open('/admin/logs','_blank');
+                }
 
                 async function checkStatus() {
                     try {
@@ -165,6 +282,24 @@ router.get('/panel', (req, res) => {
                     }
                 }
 
+                let qrCheckInterval;
+                function startQRCheck() { checkQR(); qrCheckInterval = setInterval(checkQR, 5000); }
+                function stopQRCheck() { if (qrCheckInterval) { clearInterval(qrCheckInterval); qrCheckInterval = null; } }
+                async function checkQR() {
+                    try {
+                        const response = await fetch('/admin/qr');
+                        const data = await response.json();
+
+                        if (data.qr) {
+                            document.getElementById('qrCode').src = data.qr;
+                            document.getElementById('qrCode').style.display = 'block';
+                            document.getElementById('qrStatus').textContent = 'Scan this QR code with WhatsApp';
+                        }
+                    } catch (error) {
+                        console.error('Error checking QR:', error);
+                    }
+                }
+
                 function updateStatus(data) {
                     const statusEl = document.getElementById('connectionStatus');
                     const attemptsEl = document.getElementById('reconnectAttempts');
@@ -182,32 +317,6 @@ router.get('/panel', (req, res) => {
                     }
                 }
 
-                function startQRCheck() {
-                    checkQR();
-                    qrCheckInterval = setInterval(checkQR, 5000);
-                }
-
-                function stopQRCheck() {
-                    if (qrCheckInterval) { clearInterval(qrCheckInterval); qrCheckInterval = null; }
-                }
-
-                async function checkQR() {
-                    try {
-                        const response = await fetch('/admin/qr');
-                        const data = await response.json();
-
-                        if (data.qr) {
-                            document.getElementById('qrCode').src = data.qr;
-                            document.getElementById('qrCode').style.display = 'block';
-                            document.getElementById('qrStatus').textContent = 'Scan this QR code with WhatsApp';
-                        }
-                    } catch (error) {
-                        console.error('Error checking QR:', error);
-                    }
-                }
-
-                // Initial status check
-                checkStatus();
             </script>
         </body>
         </html>
@@ -503,6 +612,167 @@ router.delete('/smm/catalog/:serviceId', async (req, res) => {
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
+});
+
+// debug endpoint: send a minimal interactive list to a phone (for testing client support)
+router.post('/debug/send-list', async (req, res) => {
+    try {
+        const { to } = req.body || {};
+        if (!to) return res.status(400).json({ error: 'to (phone) is required' });
+
+        const rows = [
+            { title: 'Option A', rowId: 'debug:optA', description: 'Test option A' },
+            { title: 'Option B', rowId: 'debug:optB', description: 'Test option B' }
+        ];
+        const sections = [{ title: 'Debug List', rows }];
+
+        const sent = await whatsappBot.sendList(to, { title: 'Test — interactive list', text: 'Select an option to test interactive messages', buttonText: 'Select', footer: 'Debug', sections });
+        if (sent) return res.json({ success: true, sent: true });
+        return res.status(500).json({ success: false, error: 'sendList returned false' });
+    } catch (err) {
+        console.error('debug send-list error', err && (err.stack || err.message));
+        res.status(500).json({ error: err && (err.message || String(err)) });
+    }
+});
+
+// register or update user (capture referral code if provided)
+router.post('/user/register', async (req, res) => {
+    try {
+        const { phone, referred_by } = req.body || {};
+        if (!phone) return res.status(400).json({ error: 'phone required' });
+        const User = require('../models/user');
+        let user = await User.findOne({ phone }).catch(()=>null);
+        if (!user) {
+            user = new User({ phone, referred_by: referred_by || null });
+            await user.save();
+        } else if (referred_by && !user.referred_by) {
+            user.referred_by = referred_by;
+            await user.save();
+        }
+        res.json({ success: true, user });
+    } catch (e) { res.status(500).json({ error: e && e.message }); }
+});
+
+// get user balance and referral info
+router.get('/user/:phone', async (req, res) => {
+    try {
+        const { phone } = req.params;
+        const User = require('../models/user');
+        const user = await User.findOne({ phone }).lean();
+        if (!user) return res.status(404).json({ error: 'user not found' });
+        res.json({ user });
+    } catch (e) { res.status(500).json({ error: e && e.message }); }
+});
+
+// request withdrawal (simple implementation: mark withdraw request and deduct balance)
+router.post('/user/:phone/withdraw', async (req, res) => {
+    try {
+        const { phone } = req.params;
+        const { amount } = req.body || {};
+        const User = require('../models/user');
+        const user = await User.findOne({ phone }).catch(()=>null);
+        if (!user) return res.status(404).json({ error: 'user not found' });
+        const amt = Number(amount || 0);
+        if (!Number.isFinite(amt) || amt <= 0) return res.status(400).json({ error: 'invalid amount' });
+        if (amt > (user.balance_tzs || 0)) return res.status(400).json({ error: 'insufficient balance' });
+        // enforce minimum withdrawal
+        if ((user.balance_tzs || 0) < 5000) return res.status(400).json({ error: 'minimum balance for withdrawal is TZS 5000' });
+        user.balance_tzs = Number((user.balance_tzs || 0) - amt);
+        user.withdrawn = Number((user.withdrawn || 0) + amt);
+        await user.save();
+        res.json({ success: true, user });
+    } catch (e) { res.status(500).json({ error: e && e.message }); }
+});
+
+// admin: list users
+router.get('/admin/users', verifyAdminToken, async (req, res) => {
+    try {
+        const User = require('../models/user');
+        const users = await User.find().sort({ createdAt: -1 }).lean();
+        res.json({ users });
+    } catch (e) { res.status(500).json({ error: e && e.message }); }
+});
+
+// update user (admin): change language or referralCode or balance
+router.put('/admin/user/:phone', verifyAdminToken, async (req, res) => {
+    try {
+        const { phone } = req.params;
+        const { language, referralCode, balance_tzs } = req.body || {};
+        const User = require('../models/user');
+        const user = await User.findOne({ phone }).catch(()=>null);
+        if (!user) return res.status(404).json({ error: 'user not found' });
+        const update = {};
+        if (typeof language !== 'undefined' && (language === 'en' || language === 'sw')) update.language = language;
+        if (typeof referralCode !== 'undefined') update.referralCode = referralCode || null;
+        if (typeof balance_tzs !== 'undefined') update.balance_tzs = Number(balance_tzs) || 0;
+        if (!Object.keys(update).length) return res.status(400).json({ error: 'nothing to update' });
+        const updated = await User.findOneAndUpdate({ phone }, { $set: update }, { new: true }).lean();
+        res.json({ success: true, user: updated });
+    } catch (e) { res.status(500).json({ error: e && e.message }); }
+});
+
+// set language for a user (admin) quickly
+router.post('/admin/user/:phone/language', verifyAdminToken, async (req, res) => {
+    try {
+        const { phone } = req.params;
+        const { language } = req.body || {};
+        if (!phone) return res.status(400).json({ error: 'phone required' });
+        if (!language || (language !== 'en' && language !== 'sw')) return res.status(400).json({ error: 'language must be en or sw' });
+        const User = require('../models/user');
+        const user = await User.findOne({ phone }).catch(()=>null);
+        if (!user) return res.status(404).json({ error: 'user not found' });
+        user.language = language;
+        await user.save();
+        // update session if exists
+        await Session.updateOne({ sessionId: phone }, { $set: { 'data.language': language } }).catch(()=>{});
+        res.json({ success: true, user });
+    } catch (e) { res.status(500).json({ error: e && e.message }); }
+});
+
+// Admin: create or update user (protected)
+router.post('/admin/user', verifyAdminToken, async (req, res) => {
+    try {
+        const { phone, referred_by, language, balance_tzs, referralCode } = req.body || {};
+        if (!phone) return res.status(400).json({ error: 'phone required' });
+        const User = require('../models/user');
+        let user = await User.findOne({ phone }).catch(()=>null);
+        if (!user) {
+            user = new User({ phone });
+        }
+        // apply provided fields
+        if (typeof referred_by !== 'undefined') user.referred_by = referred_by || null;
+        if (typeof language !== 'undefined' && (language === 'en' || language === 'sw')) user.language = language;
+        if (typeof balance_tzs !== 'undefined') user.balance_tzs = Number(balance_tzs) || 0;
+        if (typeof referralCode !== 'undefined') user.referralCode = referralCode || null;
+        await user.save();
+        res.json({ success: true, user });
+    } catch (e) { res.status(500).json({ error: e && e.message }); }
+});
+
+// Admin: get single user by phone (protected)
+router.get('/admin/user/:phone', verifyAdminToken, async (req, res) => {
+    try {
+        const { phone } = req.params;
+        if (!phone) return res.status(400).json({ error: 'phone required' });
+        const User = require('../models/user');
+        const user = await User.findOne({ phone }).lean().catch(()=>null);
+        if (!user) return res.status(404).json({ error: 'user not found' });
+        res.json({ success: true, user });
+    } catch (e) { res.status(500).json({ error: e && e.message }); }
+});
+
+// Admin: delete user by phone (protected)
+router.delete('/admin/user/:phone', verifyAdminToken, async (req, res) => {
+    try {
+        const { phone } = req.params;
+        if (!phone) return res.status(400).json({ error: 'phone required' });
+        const User = require('../models/user');
+        const deleted = await User.findOneAndDelete({ phone }).lean().catch(()=>null);
+        // remove session if exists
+        await Session.deleteOne({ sessionId: phone }).catch(()=>{});
+        if (!deleted) return res.status(404).json({ error: 'user not found' });
+        res.json({ success: true, deleted });
+    } catch (e) { res.status(500).json({ error: e && e.message }); }
 });
 
 module.exports = router;
