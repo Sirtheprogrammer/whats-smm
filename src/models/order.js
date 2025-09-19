@@ -15,8 +15,13 @@ const orderSchema = new Schema({
   priceUnitMultiplier: { type: Number, default: 1 },
   amount_due_tzs: { type: Number },
   paymentPhone: { type: String },
-  status: { type: String, enum: ['PENDING','PROCESSING','COMPLETED','FAILED','CANCELLED'], default: 'PENDING' },
-  providerResponse: Schema.Types.Mixed
+  buyer_phone: { type: String },
+  status: { type: String, enum: ['PENDING','PROCESSING','COMPLETED','FAILED','CANCELLED','PROCESSING_PAYMENT','PAYMENT_FAILED'], default: 'PENDING' },
+  providerResponse: Schema.Types.Mixed,
+  remoteOrderId: { type: String },
+  providerPaymentRef: { type: String },
+  completedAt: { type: Date },
+  referredCredited: { type: Boolean, default: false }
 }, { timestamps: true });
 
 module.exports = mongoose.model('Order', orderSchema);

@@ -53,12 +53,19 @@ class WhatsAppBot {
         browser: ['WhatsApp Bot', 'Chrome', '1.0.0'],
         connectTimeoutMs: 60_000,
         qrTimeout: 60_000,
-        syncFullHistory: true,
+        // syncFullHistory can cause Baileys to run init queries that sometimes fail with 'bad-request'
+        // make it configurable via env; default to false to avoid init errors in unstable envs
+        syncFullHistory: process.env.SYNC_FULL_HISTORY === 'true' ? true : false,
         keys: signalStore,
       });
 
       this.sock.ev.on('connection.update', this.handleConnectionUpdate);
-      this.sock.ev.on('messages.upsert', this.handleMessage);
+      // wrap event listeners to prevent uncaught exceptions bubbling from baileys internals
+      try {
+        this.sock.ev.on('messages.upsert', this.handleMessage);
+      } catch (e) {
+        logger.error('failed to attach messages.upsert listener', e && e.message);
+      }
       this.sock.ev.on('creds.update', saveCreds);
 
       logger.info('WhatsApp socket created');
@@ -117,8 +124,60 @@ class WhatsAppBot {
       if (type !== 'notify' || !Array.isArray(messages)) return;
       for (const message of messages) {
         if (message.key?.fromMe) continue;
-        const text = message.message?.conversation || message.message?.extendedTextMessage?.text || '';
+        // detect interactive list/button replies and normalize to a text token
+        let text = '';
+        try {
+          const listReply = message.message?.listResponseMessage?.singleSelectReply?.selectedRowId;
+          const btnReply = message.message?.buttonsResponseMessage?.selectedButtonId;
+          if (listReply) {
+            text = listReply;
+          } else if (btnReply) {
+            text = btnReply;
+          } else {
+            text = message.message?.conversation || message.message?.extendedTextMessage?.text || '';
+          }
+        } catch (e) {
+          text = message.message?.conversation || message.message?.extendedTextMessage?.text || '';
+        }
         const from = message.key.remoteJid;
+
+        // TEST COMMANDS: allow quick testing of buttons/lists/templates
+        try {
+          const cmd = (text || '').toString().trim();
+          if (cmd === '!buttons') {
+            const buttons = [
+              { buttonId: 'btn_1', buttonText: { displayText: 'Option 1' }, type: 1 },
+              { buttonId: 'btn_2', buttonText: { displayText: 'Option 2' }, type: 1 },
+              { buttonId: 'btn_3', buttonText: { displayText: 'Option 3' }, type: 1 }
+            ];
+            await this.sendButtons(from, { text: 'Choose one:', footer: 'Bot Footer', buttons });
+            continue;
+          }
+          if (cmd === '!list') {
+            const sections = [
+              {
+                title: 'Section A',
+                rows: [
+                  { title: 'Row 1', rowId: 'row_1', description: 'First row' },
+                  { title: 'Row 2', rowId: 'row_2', description: 'Second row' }
+                ]
+              }
+            ];
+            await this.sendList(from, { title: 'List title', text: 'Pick from the list', buttonText: 'Open list', footer: 'Footer', sections });
+            continue;
+          }
+          if (cmd === '!template') {
+            const templateButtons = [
+              { index: 1, urlButton: { displayText: 'Open site', url: 'https://example.com' } },
+              { index: 2, callButton: { displayText: 'Call', phoneNumber: '+123456789' } },
+              { index: 3, quickReplyButton: { displayText: 'Quick reply', id: 'quick_1' } }
+            ];
+            await this.sendTemplate(from, { text: 'Template example', footer: 'Footer here', templateButtons });
+            continue;
+          }
+        } catch (e) {
+          logger.error('test command handler error', e && e.message);
+        }
 
         try {
           // Hand off to conversation state machine
@@ -200,6 +259,108 @@ class WhatsAppBot {
     if (!this.isConnected || !this.sock) throw new Error('WhatsApp bot is not connected');
     const jid = to.includes('@s.whatsapp.net') ? to : `${to}@s.whatsapp.net`;
     return this.sock.sendMessage(jid, { text: content });
+  }
+
+  // send a WhatsApp interactive list message
+  async sendList(to, { title, text, buttonText, footer, sections }) {
+    if (!this.sock) {
+      // try to initialize socket if not present
+      try { await this.init(); } catch (e) { /* ignore init errors here */ }
+    }
+    if (!this.isConnected || !this.sock) throw new Error('WhatsApp bot is not connected');
+    const jid = to.includes('@s.whatsapp.net') ? to : `${to}@s.whatsapp.net`;
+    const msg1 = { title: title || '', text: text || '', buttonText: buttonText || 'Select', footer: footer || '', sections: sections || [] };
+    try {
+      console.log('[whatsapp.sendList] sending payload (direct):', JSON.stringify(msg1));
+      const r1 = await this.sock.sendMessage(jid, msg1);
+      console.log('[whatsapp.sendList] sendMessage direct response:', JSON.stringify(r1, null, 2));
+      return r1;
+    } catch (e1) {
+      console.warn('[whatsapp.sendList] direct payload failed:', e1 && (e1.message || e1));
+      // try alternative payload shape
+      const listMsg = { listMessage: { title: title || '', description: text || '', buttonText: buttonText || 'Select', footerText: footer || '', sections: sections || [] } };
+      try {
+        console.log('[whatsapp.sendList] sending payload (listMessage):', JSON.stringify(listMsg));
+        const r2 = await this.sock.sendMessage(jid, listMsg);
+        console.log('[whatsapp.sendList] sendMessage listMessage response:', JSON.stringify(r2, null, 2));
+        return r2;
+      } catch (e2) {
+        logger.error('sendList failed with both payload formats', e1 && (e1.message||e1), e2 && (e2.message||e2));
+        console.warn('[whatsapp.sendList] listMessage failed:', e2 && (e2.message || e2));
+
+        // FALLBACK: send a plain numbered text listing so the user can still choose
+        try {
+          let plain = '';
+          if (title) plain += `*${title}*\n`;
+          if (text) plain += `${text}\n\n`;
+          let counter = 1;
+          if (Array.isArray(sections)) {
+            for (const section of sections) {
+              if (section.title) {
+                plain += `_${section.title}_\n`;
+              }
+              if (Array.isArray(section.rows)) {
+                for (const row of section.rows) {
+                  // include rowId so user or bot can reference it; keep it readable
+                  const safeRowId = row.rowId || row.id || '';
+                  plain += `${counter}. ${row.title || safeRowId}`;
+                  if (safeRowId) plain += `\n   id: ${safeRowId}`;
+                  plain += '\n';
+                  counter++;
+                }
+                plain += '\n';
+              }
+            }
+          }
+          plain += '\nReply with the number or the id shown above.';
+          console.log('[whatsapp.sendList] sending fallback plain text menu');
+          const r3 = await this.sock.sendMessage(jid, { text: plain });
+          console.log('[whatsapp.sendList] fallback text response:', JSON.stringify(r3, null, 2));
+          return r3;
+        } catch (e3) {
+          logger.error('sendList fallback text also failed', e3 && (e3.message || e3));
+          return false;
+        }
+      }
+    }
+  }
+
+  // send quick-reply buttons
+  async sendButtons(to, { text, footer, buttons, headerType }) {
+    if (!this.sock) {
+      try { await this.init(); } catch (e) { /* ignore init errors */ }
+    }
+    if (!this.isConnected || !this.sock) throw new Error('WhatsApp bot is not connected');
+    const jid = to.includes('@s.whatsapp.net') ? to : `${to}@s.whatsapp.net`;
+    const payload = { text: text || '', footer: footer || '', buttons: buttons || [], headerType: headerType || 1 };
+    try {
+      console.log('[whatsapp.sendButtons] sending buttons payload:', JSON.stringify(payload));
+      const r = await this.sock.sendMessage(jid, payload);
+      console.log('[whatsapp.sendButtons] response:', JSON.stringify(r, null, 2));
+      return r;
+    } catch (err) {
+      logger.error('sendButtons failed', err && (err.message || err));
+      return false;
+    }
+  }
+
+  // send template buttons (CTA / url / call / quick reply) using baileys templateButtons shape
+  async sendTemplate(to, { text, footer, templateButtons }) {
+    if (!this.sock) {
+      try { await this.init(); } catch (e) { /* ignore init errors */ }
+    }
+    if (!this.isConnected || !this.sock) throw new Error('WhatsApp bot is not connected');
+    const jid = to.includes('@s.whatsapp.net') ? to : `${to}@s.whatsapp.net`;
+    const payload = { text: text || '', footer: footer || '', templateButtons: templateButtons || [] };
+    try {
+      console.log('[whatsapp.sendTemplate] sending template payload:', JSON.stringify(payload));
+      const r = await this.sock.sendMessage(jid, payload);
+      console.log('[whatsapp.sendTemplate] response:', JSON.stringify(r, null, 2));
+      return r;
+    } catch (err) {
+      logger.error('sendTemplate failed', err && (err.message || err));
+      return false;
+    }
   }
 
   async logout() {
